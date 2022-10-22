@@ -1,5 +1,6 @@
 struct stat;
 struct rtcdate;
+struct sysinfo;
 
 // system calls
 int fork(void);
@@ -23,8 +24,11 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+//自行实现的syscall
+int trace(int mask);
+int sysinfo(struct sysinfo*);
 
-// ulib.c
+// ulib.c(用户库)
 int stat(const char*, struct stat*);
 char* strcpy(char*, const char*);
 void *memmove(void*, const void*, int);
