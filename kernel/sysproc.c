@@ -46,7 +46,11 @@ sys_sbrk(void)
 
   if(argint(0, &n) < 0)
     return -1;
-  addr = myproc()->sz;
+  struct proc *p = myproc();
+  addr = p->sz;
+  // 要求用户内存不能越界
+  if(addr + n >= PLIC)
+    return -1;
   if(growproc(n) < 0)
     return -1;
   return addr;

@@ -51,6 +51,9 @@ exec(char *path, char **argv)
     uint64 sz1;
     if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz)) == 0)
       goto bad;
+    // 要求新进程的大小不能越界
+    if(sz1 >= PLIC)
+      goto bad;
     sz = sz1;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
@@ -114,8 +117,21 @@ exec(char *path, char **argv)
   p->sz = sz;
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
-  proc_freepagetable(oldpagetable, oldsz);
 
+  // 释放原来的用户页表对应的内核页表部分，重新映射新的用户页表TODO:开注释
+  uvmunmap(p->kernel_pagetable, 0, PGROUNDUP(oldsz)/PGSIZE, 0);
+  proc_freepagetable(oldpagetable, oldsz);
+  // 建立新的用户页表和内核页表的映射TODO:开注释
+  for(uint64 va = 0; va < (p->sz); va+=PGSIZE)
+  {
+    pte_t *pte = walk(p->pagetable, va, 0);
+    pte_t *kernel_pte = walk(p->kernel_pagetable, va, 1);
+    *kernel_pte = (*pte)&(~PTE_U);
+  }
+
+  // lab 4 vmprint
+  if(p->pid == 1)
+    vmprint(p->pagetable);
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:

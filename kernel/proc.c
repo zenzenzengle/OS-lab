@@ -24,9 +24,8 @@ extern char trampoline[]; // trampoline.S
 // initialize the proc table at boot time.
 void
 procinit(void)
-{
-  struct proc *p;
-  
+{  
+  struct proc* p;
   initlock(&pid_lock, "nextpid");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
@@ -34,12 +33,14 @@ procinit(void)
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      // char *pa = kalloc();
+      // if(pa == 0)
+      //   panic("kalloc");
+      // uint64 va = KSTACK((int) (p - proc));
+      // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      // p->kstack = va;
+      // p->kstack_pa = (uint64)pa;
+      p->kstack = 0;
   }
   kvminithart();
 }
@@ -113,6 +114,22 @@ found:
     return 0;
   }
 
+  // 创建进程内核页表
+  p->kernel_pagetable = proc_kptinit();
+  if(p->kernel_pagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  // 建立栈映射（参照procinit）
+  // 为进程的内核堆栈分配一个页。将它映射到高内存中，然后是无效的保护页。
+  char *pa = kalloc();
+  if(pa == 0)
+    panic("kalloc");
+  uint64 va = MAXVA - 4*PGSIZE;
+  mappages(p->kernel_pagetable, va, PGSIZE, (uint64)pa, PTE_R | PTE_W);
+  p->kstack = va;
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -139,8 +156,17 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+
+  // 释放内核页表
+  if(p->kernel_pagetable)
+    proc_free_kernelpagetable(p->kernel_pagetable, p->kstack, p->sz);
   if(p->pagetable)
+  {
     proc_freepagetable(p->pagetable, p->sz);
+
+  }
+  p->kstack = 0;
+  p->kernel_pagetable = 0;
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -221,6 +247,12 @@ userinit(void)
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+  // 将初始进程的唯一一个页表项复制到内核页表
+  pte_t *pte = walk(p->pagetable, 0, 0);
+  pte_t *kernel_pte = walk(p->kernel_pagetable, 0, 1);
+  *kernel_pte = (*pte)&(~PTE_U);
+
+
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -242,12 +274,29 @@ growproc(int n)
   struct proc *p = myproc();
 
   sz = p->sz;
+  // 用户内存不得越界
+  if(sz + n >= PLIC)
+  {
+    printf("growproc out of range\n");
+    return -1;
+  }
   if(n > 0){
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+
+    for(uint64 va = sz-n; va < sz; va+=PGSIZE)
+    {
+      pte_t *pte = walk(p->pagetable, va, 0);
+      pte_t *kernel_pte = walk(p->kernel_pagetable, va, 1);
+      *kernel_pte = (*pte)&(~PTE_U);
+    }
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+    if(PGROUNDUP(sz) < PGROUNDUP(sz-n)){
+      int npages = (PGROUNDUP(sz-n) - PGROUNDUP(sz)) / PGSIZE;
+      uvmunmap(p->kernel_pagetable, PGROUNDUP(sz), npages, 0);
+    }
   }
   p->sz = sz;
   return 0;
@@ -274,7 +323,6 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
-
   np->parent = p;
 
   // copy saved user registers.
@@ -292,6 +340,14 @@ fork(void)
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
+
+  // 同时也将子进程的页表复制到内核页表上
+  for(uint64 va = 0; va < np->sz; va+=PGSIZE)
+  {
+    pte_t *pte = walk(np->pagetable, va, 0);
+    pte_t *kernel_pte = walk(np->kernel_pagetable, va, 1);
+    *kernel_pte = (*pte)&(~PTE_U);
+  }
 
   np->state = RUNNABLE;
 
@@ -472,10 +528,16 @@ scheduler(void)
         // to release its lock and then reacquire it
         // before jumping back to us.
         p->state = RUNNING;
+        // 调入进程对应的内核页表
+        w_satp(MAKE_SATP(p->kernel_pagetable));
+        sfence_vma();
+
         c->proc = p;
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
+        // 进程运行完成需要切换回内核页表
+        kvminithart();
         // It should have changed its p->state before coming back.
         c->proc = 0; // cpu dosen't run any process now
 

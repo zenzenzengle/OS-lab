@@ -98,6 +98,8 @@ struct proc {
   uint64 kstack;               // Virtual address of kernel stack
   uint64 sz;                   // Size of process memory (bytes)
   pagetable_t pagetable;       // User page table
+  pagetable_t kernel_pagetable;  // kernel page table
+  uint64 kernel_stack;         // 在初始化时保存内核栈地址，在allocproc时再分配到内核页表
   struct trapframe *trapframe; // data page for trampoline.S
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
